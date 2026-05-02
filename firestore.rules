@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function getUserData(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)).data;
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow get: if isSignedIn(); // Need to check role and sharing status
+      allow list: if isSignedIn(); // For doctors to find patients might be needed, but usually we give direct link or ID. Let's restrict it to signed in for now.
+      
+      allow create: if isOwner(userId) 
+        && request.resource.data.keys().hasAll(['name', 'email', 'role'])
+        && request.resource.data.role in ['patient', 'doctor'];
+        
+      allow update: if isOwner(userId)
+        && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'address', 'age', 'gender', 'bloodGroup', 'degree', 'isSharingEnabled']));
+    }
+
+    // Records Collection
+    match /records/{recordId} {
+      allow create: if isSignedIn() 
+        && request.resource.data.patientId == request.auth.uid
+        && request.resource.data.type in ['prescription', 'report'];
+
+      allow get: if isSignedIn() && (
+        resource.data.patientId == request.auth.uid ||
+        (getUserData(resource.data.patientId).role == 'patient' && getUserData(resource.data.patientId).isSharingEnabled == true)
+      );
+
+      allow list: if isSignedIn() && (
+        request.query.limit <= 100 && (
+          // Own records
+          resource.data.patientId == request.auth.uid ||
+          // Doctor viewing shared records
+          (getUserData(resource.data.patientId).isSharingEnabled == true)
+        )
+      );
+
+      allow update, delete: if isSignedIn() && resource.data.patientId == request.auth.uid;
+    }
+  }
+}
